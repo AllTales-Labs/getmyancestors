@@ -89,15 +89,21 @@ class Session(requests.Session):
                     "username": self.username,
                 }
                 self.write_log("Getting an authorization code: " + url)
+                self.write_log(f"OAuth parameters: {params}")
                 response = self.get(url, headers=self.headers, params=params)
                 response.raise_for_status()
+                self.write_log(f"OAuth response URL: {response.url}")
                 try:
                     code = parse_qs(urlparse(response.url).query).get("code")[0]
                 except Exception as e:
+                    self.write_log(f"Failed to extract authorization code from URL: {response.url}")
+                    self.write_log(f"Error: {e}")
+                    self.write_log("This usually means FamilySearch requires additional authentication steps.")
                     webbrowser.open(response.url)
                     print(
                         "Please log in to the web page that just opened and try again."
                     )
+                    print(f"Debug info: Response URL was: {response.url}")
                     sys.exit(2)
 
                 url = "https://ident.familysearch.org/cis-web/oauth2/v3/token"
@@ -151,6 +157,7 @@ class Session(requests.Session):
     def get_url(self, url, headers=None, no_api=False):
         """retrieve JSON structure from a FamilySearch URL"""
         self.counter += 1
+        request_start = time.time()
         if headers is None:
             headers = {"Accept": "application/x-gedcomx-v1+json"}
         headers.update(self.headers)
@@ -200,6 +207,9 @@ class Session(requests.Session):
                 time.sleep(self.timeout)
                 continue
             try:
+                request_time = time.time() - request_start
+                if self.verbose and request_time > 1.0:  # Log slow requests
+                    self.write_log(f"Slow request ({request_time:.2f}s): {url}")
                 return r.json()
             except Exception as e:
                 self.write_log("WARNING: corrupted file from %s, error: %s" % (url, e))

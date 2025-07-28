@@ -316,21 +316,17 @@ class Indi:
         self.memories = set()
 
     def add_data(self, data):
-        """add FS individual data"""
+        """add FS individual data - SIMPLIFIED VERSION"""
         if data:
             self.living = data["living"]
+            
+            # Only get the preferred name
             for x in data["names"]:
                 if x["preferred"]:
                     self.name = Name(x, self.tree)
-                else:
-                    if x["type"] == "http://gedcomx.org/Nickname":
-                        self.nicknames.add(Name(x, self.tree))
-                    if x["type"] == "http://gedcomx.org/BirthName":
-                        self.birthnames.add(Name(x, self.tree))
-                    if x["type"] == "http://gedcomx.org/AlsoKnownAs":
-                        self.aka.add(Name(x, self.tree))
-                    if x["type"] == "http://gedcomx.org/MarriedName":
-                        self.married.add(Name(x, self.tree))
+                    break
+            
+            # Only get gender
             if "gender" in data:
                 if data["gender"]["type"] == "http://gedcomx.org/Male":
                     self.gender = "M"
@@ -338,9 +334,14 @@ class Indi:
                     self.gender = "F"
                 elif data["gender"]["type"] == "http://gedcomx.org/Unknown":
                     self.gender = "U"
+            
+            # Only get birth and death facts
             if "facts" in data:
                 for x in data["facts"]:
-                    if x["type"] == "http://familysearch.org/v1/LifeSketch":
+                    if x["type"] == "http://gedcomx.org/Birth" or x["type"] == "http://gedcomx.org/Death":
+                        self.facts.add(Fact(x, self.tree))
+                    elif x["type"] == "http://familysearch.org/v1/LifeSketch":
+                        # Keep life sketch as it contains the brief history/bio
                         self.notes.add(
                             Note(
                                 "=== %s ===\n%s"
@@ -348,9 +349,9 @@ class Indi:
                                 self.tree,
                             )
                         )
-                    else:
-                        self.facts.add(Fact(x, self.tree))
-            if "sources" in data:
+            
+            # Only get Wikipedia sources - IMPLEMENTED
+            if "sources" in data and hasattr(self.tree, 'get_wikipedia_sources') and self.tree.get_wikipedia_sources:
                 sources = self.tree.fs.get_url(
                     "/platform/tree/persons/%s/sources" % self.fid
                 )
@@ -363,26 +364,45 @@ class Indi:
                             else None
                         )
                     for source in sources["sourceDescriptions"]:
-                        if source["id"] not in self.tree.sources:
-                            self.tree.sources[source["id"]] = Source(source, self.tree)
-                        self.sources.add(
-                            (self.tree.sources[source["id"]], quotes[source["id"]])
-                        )
+                        # Check if this is a Wikipedia source
+                        is_wikipedia = False
+                        if "about" in source:
+                            url = source["about"].lower()
+                            if "wikipedia" in url or "wiki" in url:
+                                is_wikipedia = True
+                        if "titles" in source:
+                            title = source["titles"][0]["value"].lower()
+                            if "wikipedia" in title or "wiki" in title:
+                                is_wikipedia = True
+                        if "citations" in source:
+                            citation = source["citations"][0]["value"].lower()
+                            if "wikipedia" in citation or "wiki" in citation:
+                                is_wikipedia = True
+                        
+                        # Only add Wikipedia sources
+                        if is_wikipedia:
+                            if source["id"] not in self.tree.sources:
+                                self.tree.sources[source["id"]] = Source(source, self.tree)
+                            self.sources.add(
+                                (self.tree.sources[source["id"]], quotes[source["id"]])
+                            )
+            
+            # Only get text-based memories (bios/histories), ignore photos/documents
             for evidence in data.get("evidence", []):
                 memory_id, *_ = evidence["id"].partition("-")
                 url = "/platform/memories/memories/%s" % memory_id
                 memorie = self.tree.fs.get_url(url)
                 if memorie and "sourceDescriptions" in memorie:
                     for x in memorie["sourceDescriptions"]:
+                        # Only get text-based memories (bios/histories)
                         if x["mediaType"] == "text/plain":
                             text = "\n".join(
                                 val.get("value", "")
                                 for val in x.get("titles", [])
                                 + x.get("descriptions", [])
                             )
-                            self.notes.add(Note(text, self.tree))
-                        else:
-                            self.memories.add(Memorie(x))
+                            if text.strip():  # Only add if there's actual content
+                                self.notes.add(Note(text, self.tree))
 
     def add_fams(self, fams):
         """add family fid (for spouse or parent)"""
@@ -393,13 +413,20 @@ class Indi:
         self.famc_fid.add(famc)
 
     def get_notes(self):
-        """retrieve individual notes"""
+        """retrieve individual notes - SIMPLIFIED VERSION"""
         notes = self.tree.fs.get_url("/platform/tree/persons/%s/notes" % self.fid)
         if notes:
             for n in notes["persons"][0]["notes"]:
-                text_note = "=== %s ===\n" % n["subject"] if "subject" in n else ""
-                text_note += n["text"] + "\n" if "text" in n else ""
-                self.notes.add(Note(text_note, self.tree))
+                # Only get notes that have actual content and aren't contributor lists
+                text_note = ""
+                if "subject" in n:
+                    text_note = "=== %s ===\n" % n["subject"]
+                if "text" in n:
+                    text_note += n["text"] + "\n"
+                
+                # Skip contributor notes and empty notes
+                if text_note and "contributor" not in text_note.lower():
+                    self.notes.add(Note(text_note, self.tree))
 
     def get_ordinances(self):
         """retrieve LDS ordinances
@@ -434,59 +461,19 @@ class Indi:
         return res, famc
 
     def get_contributors(self):
-        """retrieve contributors"""
-        temp = set()
-        url = "/platform/tree/persons/%s/changes" % self.fid
-        data = self.tree.fs.get_url(url, {"Accept": "application/x-gedcomx-atom+json"})
-        if data:
-            for entries in data["entries"]:
-                for contributors in entries["contributors"]:
-                    temp.add(contributors["name"])
-        if temp:
-            text = "=== %s ===\n%s" % (
-                self.tree.fs._("Contributors"),
-                "\n".join(sorted(temp)),
-            )
-            for n in self.tree.notes:
-                if n.text == text:
-                    self.notes.add(n)
-                    return
-            self.notes.add(Note(text, self.tree))
+        """retrieve contributors - SIMPLIFIED VERSION"""
+        # Skip contributors in simplified version
+        pass
 
     def print(self, file=sys.stdout):
-        """print individual in GEDCOM format"""
+        """print individual in GEDCOM format - SIMPLIFIED VERSION"""
         file.write("0 @I%s@ INDI\n" % self.num)
         if self.name:
             self.name.print(file)
-        for o in self.nicknames:
-            file.write(cont("2 NICK %s %s" % (o.given, o.surname)))
-        for o in self.birthnames:
-            o.print(file)
-        for o in self.aka:
-            o.print(file, "aka")
-        for o in self.married:
-            o.print(file, "married")
         if self.gender:
             file.write("1 SEX %s\n" % self.gender)
         for o in self.facts:
             o.print(file)
-        for o in self.memories:
-            o.print(file)
-        if self.baptism:
-            file.write("1 BAPL\n")
-            self.baptism.print(file)
-        if self.confirmation:
-            file.write("1 CONL\n")
-            self.confirmation.print(file)
-        if self.initiatory:
-            file.write("1 WAC\n")
-            self.initiatory.print(file)
-        if self.endowment:
-            file.write("1 ENDL\n")
-            self.endowment.print(file)
-        if self.sealing_child:
-            file.write("1 SLGC\n")
-            self.sealing_child.print(file)
         for num in self.fams_num:
             file.write("1 FAMS @F%s@\n" % num)
         for num in self.famc_num:
@@ -533,7 +520,7 @@ class Fam:
             self.chil_fid.add(child)
 
     def add_marriage(self, fid):
-        """retrieve and add marriage information
+        """retrieve and add marriage information - SIMPLIFIED VERSION
         :param fid: the marriage fid
         """
         if not self.fid:
@@ -541,72 +528,24 @@ class Fam:
             url = "/platform/tree/couple-relationships/%s" % self.fid
             data = self.tree.fs.get_url(url)
             if data:
+                # Only get marriage facts (date/place)
                 if "facts" in data["relationships"][0]:
                     for x in data["relationships"][0]["facts"]:
-                        self.facts.add(Fact(x, self.tree))
-                if "sources" in data["relationships"][0]:
-                    quotes = dict()
-                    for x in data["relationships"][0]["sources"]:
-                        quotes[x["descriptionId"]] = (
-                            x["attribution"]["changeMessage"]
-                            if "changeMessage" in x["attribution"]
-                            else None
-                        )
-                    new_sources = quotes.keys() - self.tree.sources.keys()
-                    if new_sources:
-                        sources = self.tree.fs.get_url(
-                            "/platform/tree/couple-relationships/%s/sources" % self.fid
-                        )
-                        for source in sources["sourceDescriptions"]:
-                            if (
-                                source["id"] in new_sources
-                                and source["id"] not in self.tree.sources
-                            ):
-                                self.tree.sources[source["id"]] = Source(
-                                    source, self.tree
-                                )
-                    for source_fid in quotes:
-                        self.sources.add(
-                            (self.tree.sources[source_fid], quotes[source_fid])
-                        )
+                        if x["type"] == "http://gedcomx.org/Marriage":
+                            self.facts.add(Fact(x, self.tree))
 
     def get_notes(self):
-        """retrieve marriage notes"""
-        if self.fid:
-            notes = self.tree.fs.get_url(
-                "/platform/tree/couple-relationships/%s/notes" % self.fid
-            )
-            if notes:
-                for n in notes["relationships"][0]["notes"]:
-                    text_note = "=== %s ===\n" % n["subject"] if "subject" in n else ""
-                    text_note += n["text"] + "\n" if "text" in n else ""
-                    self.notes.add(Note(text_note, self.tree))
+        """retrieve marriage notes - SIMPLIFIED VERSION"""
+        # Skip family notes in simplified version
+        pass
 
     def get_contributors(self):
-        """retrieve contributors"""
-        if self.fid:
-            temp = set()
-            url = "/platform/tree/couple-relationships/%s/changes" % self.fid
-            data = self.tree.fs.get_url(
-                url, {"Accept": "application/x-gedcomx-atom+json"}
-            )
-            if data:
-                for entries in data["entries"]:
-                    for contributors in entries["contributors"]:
-                        temp.add(contributors["name"])
-            if temp:
-                text = "=== %s ===\n%s" % (
-                    self.tree.fs._("Contributors"),
-                    "\n".join(sorted(temp)),
-                )
-                for n in self.tree.notes:
-                    if n.text == text:
-                        self.notes.add(n)
-                        return
-                self.notes.add(Note(text, self.tree))
+        """retrieve contributors - SIMPLIFIED VERSION"""
+        # Skip contributors in simplified version
+        pass
 
     def print(self, file=sys.stdout):
-        """print family information in GEDCOM format"""
+        """print family information in GEDCOM format - SIMPLIFIED VERSION"""
         file.write("0 @F%s@ FAM\n" % self.num)
         if self.husb_num:
             file.write("1 HUSB @I%s@\n" % self.husb_num)
@@ -616,17 +555,8 @@ class Fam:
             file.write("1 CHIL @I%s@\n" % num)
         for o in self.facts:
             o.print(file)
-        if self.sealing_spouse:
-            file.write("1 SLGS\n")
-            self.sealing_spouse.print(file)
         if self.fid:
             file.write("1 _FSFTID %s\n" % self.fid)
-        for o in self.notes:
-            o.link(file)
-        for source, quote in self.sources:
-            source.link(file, 1)
-            if quote:
-                file.write(cont("2 PAGE " + quote))
 
 
 class Tree:
@@ -634,7 +564,7 @@ class Tree:
     :param fs: a Session object
     """
 
-    def __init__(self, fs=None):
+    def __init__(self, fs=None, get_wikipedia_sources=False):
         self.fs = fs
         self.indi = dict()
         self.fam = dict()
@@ -642,6 +572,7 @@ class Tree:
         self.sources = dict()
         self.places = dict()
         self.display_name = self.lang = None
+        self.get_wikipedia_sources = get_wikipedia_sources
         if fs:
             self.display_name = fs.display_name
             self.lang = babelfish.Language.fromalpha2(fs.lang).name

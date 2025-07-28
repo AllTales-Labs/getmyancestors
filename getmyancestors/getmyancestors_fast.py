@@ -1,26 +1,26 @@
-# coding: utf-8
+#!/usr/bin/env python3
+"""
+Ultra-fast version of getmyancestors that only extracts essential data:
+- Name
+- Birth/death dates and locations
+- Profile ID
+- Family relationships
+- No sources, no notes, no memories
+"""
 
-# global imports
-from __future__ import print_function
-import re
 import sys
 import time
-from urllib.parse import urlparse, parse_qs
+import re
 import getpass
-import asyncio
 import argparse
-
-# local imports
-from getmyancestors.classes.tree import Tree
+from getmyancestors.classes.tree_ultra_fast import Tree
 from getmyancestors.classes.session import Session
-
-
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Retrieve GEDCOM data from FamilySearch Tree (4 Jul 2016)",
+        description="Ultra-fast GEDCOM extraction from FamilySearch (minimal data)",
         add_help=False,
-        usage="getmyancestors -u username -p password [options]",
+        usage="getmyancestors_fast -u username -p password [options]",
     )
     parser.add_argument(
         "-u", "--username", metavar="<STR>", type=str, help="FamilySearch username"
@@ -60,19 +60,6 @@ def main():
         help="Add spouses and couples information [False]",
     )
     parser.add_argument(
-        "--get-notes",
-        action="store_true",
-        default=False,
-        help="Download individual notes (adds significant time) [False]",
-    )
-    parser.add_argument(
-        "--get-sources",
-        action="store_true",
-        default=False,
-        help="Download Wikipedia sources (adds significant time) [False]",
-    )
-    # Contributors and ordinances options removed in simplified version
-    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -86,18 +73,6 @@ def main():
         type=int,
         default=60,
         help="Timeout in seconds [60]",
-    )
-    parser.add_argument(
-        "--show-password",
-        action="store_true",
-        default=False,
-        help="Show password in .settings file [False]",
-    )
-    parser.add_argument(
-        "--save-settings",
-        action="store_true",
-        default=False,
-        help="Save settings into file [False]",
     )
     parser.add_argument(
         "-o",
@@ -115,20 +90,14 @@ def main():
         default=False,
         help="output log file [stderr]",
     )
-    parser.add_argument(
-        "--client_id", metavar="<STR>", type=str, help="Use Specific Client ID"
-    )
-    parser.add_argument(
-        "--redirect_uri", metavar="<STR>", type=str, help="Use Specific Redirect Uri"
-    )
 
-    # extract arguments from the command line
     try:
         parser.error = parser.exit
         args = parser.parse_args()
     except SystemExit:
         parser.print_help(file=sys.stderr)
         sys.exit(2)
+
     if args.individuals:
         for fid in args.individuals:
             if not re.match(r"[A-Z0-9]{4}-[A-Z0-9]{3}", fid):
@@ -150,66 +119,34 @@ def main():
         'ancestors': 0,
         'descendants': 0,
         'spouses': 0,
-        'notes': 0,
         'total': 0
     }
 
-    # Report settings used when getmyancestors is executed
-    if args.save_settings and args.outfile.name != "<stdout>":
-
-        def parse_action(act):
-            if not args.show_password and act.dest == "password":
-                return "******"
-            value = getattr(args, act.dest)
-            return str(getattr(value, "name", value))
-
-        formatting = "{:74}{:\t>1}\n"
-        settings_name = args.outfile.name.split(".")[0] + ".settings"
-        try:
-            with open(settings_name, "w") as settings_file:
-                settings_file.write(
-                    formatting.format("time stamp: ", time.strftime("%X %x %Z"))
-                )
-                for action in parser._actions:
-                    settings_file.write(
-                        formatting.format(
-                            action.option_strings[-1], parse_action(action)
-                        )
-                    )
-        except OSError as exc:
-            print(
-                "Unable to write %s: %s" % (settings_name, repr(exc)), file=sys.stderr
-            )
-
-    # initialize a FamilySearch session and a family tree object
+    # Login
     login_start = time.time()
     print("Login to FamilySearch...", file=sys.stderr)
     fs = Session(
         args.username,
         args.password,
-        args.client_id,
-        args.redirect_uri,
-        args.verbose,
-        args.logfile,
-        args.timeout,
+        verbose=args.verbose,
+        logfile=args.logfile,
+        timeout=args.timeout,
     )
     if not fs.logged:
         sys.exit(2)
     timing_data['login'] = time.time() - login_start
     _ = fs._
-    tree = Tree(fs, get_wikipedia_sources=args.get_sources)
-
-    # LDS ordinances check removed in simplified version
+    tree = Tree(fs)
 
     try:
-        # add list of starting individuals to the family tree
+        # Starting individuals
         todo = args.individuals if args.individuals else [fs.fid]
         starting_start = time.time()
         print(_("Downloading starting individuals..."), file=sys.stderr)
         tree.add_indis(todo)
         timing_data['starting_individuals'] = time.time() - starting_start
 
-        # download ancestors
+        # Ancestors
         ancestors_start = time.time()
         todo = set(tree.indi.keys())
         done = set()
@@ -224,7 +161,7 @@ def main():
             todo = tree.add_parents(todo) - done
         timing_data['ancestors'] = time.time() - ancestors_start
 
-        # download descendants
+        # Descendants
         descendants_start = time.time()
         todo = set(tree.indi.keys())
         done = set()
@@ -239,7 +176,7 @@ def main():
             todo = tree.add_children(todo) - done
         timing_data['descendants'] = time.time() - descendants_start
 
-        # download spouses
+        # Spouses
         if args.marriage:
             spouses_start = time.time()
             print(_("Downloading spouses and marriage information..."), file=sys.stderr)
@@ -247,25 +184,8 @@ def main():
             tree.add_spouses(todo)
             timing_data['spouses'] = time.time() - spouses_start
 
-        # download notes only (simplified version) - OPTIONAL
-        notes_start = time.time()
-        if args.get_notes:  # Only download notes if explicitly requested
-            async def download_stuff(loop):
-                futures = set()
-                for fid, indi in tree.indi.items():
-                    futures.add(loop.run_in_executor(None, indi.get_notes))
-                for future in futures:
-                    await future
-
-            loop = asyncio.get_event_loop()
-            print(_("Downloading notes..."), file=sys.stderr)
-            loop.run_until_complete(download_stuff(loop))
-        else:
-            print(_("Skipping notes download (use --get-notes to include)"), file=sys.stderr)
-        timing_data['notes'] = time.time() - notes_start
-
     finally:
-        # compute number for family relationships and print GEDCOM file
+        # Generate GEDCOM
         tree.reset_num()
         tree.print(args.outfile)
         timing_data['total'] = time.time() - start_time
@@ -287,17 +207,16 @@ def main():
         )
         
         # Print detailed timing information
-        print("\n=== TIMING BREAKDOWN ===", file=sys.stderr)
+        print("\n=== ULTRA-FAST TIMING BREAKDOWN ===", file=sys.stderr)
         print(f"Login: {timing_data['login']:.2f}s", file=sys.stderr)
         print(f"Starting individuals: {timing_data['starting_individuals']:.2f}s", file=sys.stderr)
         print(f"Ancestors: {timing_data['ancestors']:.2f}s", file=sys.stderr)
         print(f"Descendants: {timing_data['descendants']:.2f}s", file=sys.stderr)
         print(f"Spouses: {timing_data['spouses']:.2f}s", file=sys.stderr)
-        print(f"Notes: {timing_data['notes']:.2f}s", file=sys.stderr)
         print(f"Total: {timing_data['total']:.2f}s", file=sys.stderr)
         print(f"HTTP requests: {fs.counter}", file=sys.stderr)
         print(f"Requests per second: {fs.counter/timing_data['total']:.1f}", file=sys.stderr)
-
+        print(f"Individuals per second: {len(tree.indi)/timing_data['total']:.1f}", file=sys.stderr)
 
 if __name__ == "__main__":
-    main()
+    main() 
