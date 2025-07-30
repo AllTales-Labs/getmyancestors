@@ -242,6 +242,8 @@ class Tree:
         self.fs = fs
         self.indi = dict()
         self.fam = dict()
+        self.notes = list()
+        self.sources = dict()
         self.places = dict()
         self.display_name = self.lang = None
         if fs:
