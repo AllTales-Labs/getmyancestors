@@ -68,7 +68,11 @@ class Name:
 
     def print(self, file=sys.stdout, typ=None):
         """print Name in GEDCOM format"""
-        tmp = "1 NAME %s /%s/" % (self.given, self.surname)
+        # Include prefix in the main name field if it exists
+        given_name = self.given
+        if self.prefix:
+            given_name = self.prefix + " " + given_name
+        tmp = "1 NAME %s /%s/" % (given_name, self.surname)
         if self.suffix:
             tmp += " " + self.suffix
         file.write(cont(tmp))
